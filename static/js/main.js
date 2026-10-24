@@ -62,8 +62,7 @@ function showView(name) {
 }
 
 function renderLinkState(live) {
-  const { state, status, error, link } = live;
-  const ageSec = state ? Date.now() / 1000 - state.received_at : Infinity;
+  const { state, status, error, link, age_sec: ageSec = Infinity } = live;
   if (state) {
     hostUserEl.textContent = `${link.split('@')[0]}@${state.host.hostname}`;
     hostMetaEl.textContent = `${apiHostLabel()} · ${state.host.os}`;
@@ -72,7 +71,7 @@ function renderLinkState(live) {
   const isHealthy = status === 'ok' && ageSec < STALE_AFTER_SEC;
   linkStateEl.dataset.state = status === 'connecting' ? 'connecting' : (isHealthy ? 'ok' : 'error');
   if (status === 'connecting') linkTextEl.textContent = `đang lấy số liệu từ ${link}…`;
-  else if (isHealthy) linkTextEl.textContent = `trực tuyến · ${clockTime(state.received_at)}`;
+  else if (isHealthy) linkTextEl.textContent = `trực tuyến · ${clockTime(Date.now() / 1000)}`;
   else linkTextEl.textContent = state ? `mất kết nối · số liệu cũ ${duration(ageSec)}` : 'chưa lấy được số liệu';
   bannerEl.hidden = !error;
   if (error) bannerEl.textContent = `Lỗi lấy số liệu: ${error}\nPanel tự thử lại mỗi vài giây.`;

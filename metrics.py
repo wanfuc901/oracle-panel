@@ -136,8 +136,10 @@ class Sampler:
         self._wake.set()
         with self._lock:
             status = "error" if self._error else ("ok" if self._state else "connecting")
+            # Age is measured on this host's clock so the browser never compares two machines' clocks.
+            age_sec = round(time.time() - self._state["received_at"], 1) if self._state else None
             return {"status": status, "error": self._error, "link": self._link.label,
-                    "interval_sec": self._interval_sec, "state": self._state}
+                    "interval_sec": self._interval_sec, "age_sec": age_sec, "state": self._state}
 
     def _loop(self) -> None:
         while not self._stop.is_set():
