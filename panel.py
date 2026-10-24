@@ -14,6 +14,7 @@ import json
 import logging
 import secrets
 import sys
+import threading
 import time
 import webbrowser
 from dataclasses import dataclass
@@ -38,6 +39,12 @@ MAX_BODY_BYTES = 64 * 1024
 MAX_PASSWORD_CHARS = 256
 TOKEN_PLACEHOLDER = "__PANEL_TOKEN__"
 CORS_MAX_AGE_SEC = "600"
+LIVE_STREAM_PATH = "/api/live/stream"
+# A snapshot goes out at least this often even when the sampler is stuck, so the browser sees the growing age
+# and Cloudflare never drops the stream as idle. Must stay below metrics.IDLE_AFTER_SEC.
+STREAM_KEEPALIVE_SEC = 5
+STREAM_WRITE_TIMEOUT_SEC = 15
+MAX_LIVE_STREAMS = 16           # each open tab holds one server thread
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
                  ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml"}
 
@@ -57,6 +64,7 @@ class PanelApp:
     allowed_origins: set[str]
     desktop_token: str | None      # set in desktop mode, injected into index.html
     login_gate: LoginGate | None   # set in public mode
+    stream_slots: threading.BoundedSemaphore
 
 
 def build_app(config: dict, runner: Runner, port: int) -> PanelApp:
@@ -74,7 +82,6 @@ def build_app(config: dict, runner: Runner, port: int) -> PanelApp:
         runner=runner,
         sampler=sampler,
         get_routes={
-            "/api/live": lambda _query: sampler.latest(),
             "/api/services": lambda _query: ops.list_services(),
             "/api/service/logs": ops.service_logs,
             "/api/ports": lambda _query: ops.listening_ports(),
@@ -89,6 +96,7 @@ def build_app(config: dict, runner: Runner, port: int) -> PanelApp:
         allowed_origins=set((public or {}).get("allowed_origins", [])),
         desktop_token=None if public else secrets.token_urlsafe(32),
         login_gate=login_gate,
+        stream_slots=threading.BoundedSemaphore(MAX_LIVE_STREAMS),
     )
 
 
@@ -124,6 +132,10 @@ def make_handler(app: PanelApp) -> type[BaseHTTPRequestHandler]:
             self._send(status, json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                        "application/json; charset=utf-8")
 
+        def _send_unauthorized(self) -> None:
+            status = HTTPStatus.UNAUTHORIZED if app.login_gate else HTTPStatus.FORBIDDEN
+            self._send_json(status, {"error": "Cần đăng nhập lại" if app.login_gate else "Phiên hết hạn, tải lại trang"})
+
         # ---------- request guards ----------
         def _client_id(self) -> str:
             # Only cloudflared can reach 127.0.0.1, so CF-Connecting-IP is set by Cloudflare, not the caller.
@@ -157,6 +169,8 @@ def make_handler(app: PanelApp) -> type[BaseHTTPRequestHandler]:
             url = urlsplit(self.path)
             if url.path == "/api/health":
                 self._send_json(HTTPStatus.OK, {"ok": True, "login_required": app.login_gate is not None})
+            elif url.path == LIVE_STREAM_PATH:
+                self._stream_live()
             elif url.path.startswith("/api/"):
                 self._dispatch(app.get_routes, url.path, dict(parse_qsl(url.query)))
             else:
@@ -218,8 +232,7 @@ def make_handler(app: PanelApp) -> type[BaseHTTPRequestHandler]:
 
         def _dispatch(self, routes: dict[str, Route], path: str, params: dict, audit: bool = False) -> None:
             if not self._authorized():
-                status = HTTPStatus.UNAUTHORIZED if app.login_gate else HTTPStatus.FORBIDDEN
-                self._send_json(status, {"error": "Cần đăng nhập lại" if app.login_gate else "Phiên hết hạn, tải lại trang"})
+                self._send_unauthorized()
                 return
             handler = routes.get(path)
             if handler is None:
@@ -236,6 +249,39 @@ def make_handler(app: PanelApp) -> type[BaseHTTPRequestHandler]:
             except (RunnerError, RuntimeError, json.JSONDecodeError) as exc:
                 LOG.warning("%s failed: %s", path, exc)
                 self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
+
+        def _stream_live(self) -> None:
+            """Server-Sent Events: one `data:` frame per sample. The response is close-delimited (HTTP/1.0),
+            so it ends when the session expires or the client goes away; the browser reconnects on its own."""
+            if not self._authorized():
+                self._send_unauthorized()
+                return
+            if not app.stream_slots.acquire(blocking=False):
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Quá nhiều tab đang mở panel, đóng bớt rồi tải lại"})
+                return
+            try:
+                self._write_stream_head()
+                # A dead peer only surfaces once the socket buffer fills; the timeout stops that write hanging forever.
+                self.connection.settimeout(STREAM_WRITE_TIMEOUT_SEC)
+                seen_version = -1
+                while self._authorized():
+                    seen_version, snapshot = app.sampler.wait_for_update(seen_version, STREAM_KEEPALIVE_SEC)
+                    self.wfile.write(b"data: " + json.dumps(snapshot, ensure_ascii=False).encode("utf-8") + b"\n\n")
+                    self.wfile.flush()
+            except OSError as exc:   # BrokenPipe/ConnectionReset/timeout: the tab closed or the network dropped
+                LOG.debug("live stream to %s closed: %s", self._client_id(), exc)
+            finally:
+                app.stream_slots.release()
+
+        def _write_stream_head(self) -> None:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Accel-Buffering", "no")
+            self._cors_headers()
+            self.end_headers()
+            self.wfile.flush()
 
         def _serve_static(self, path: str) -> None:
             relative = "index.html" if path in ("", "/") else path.lstrip("/")

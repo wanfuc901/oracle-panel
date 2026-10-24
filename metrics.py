@@ -108,7 +108,8 @@ class MetricsProcessor:
 
 
 class Sampler:
-    """Polls the probe every `interval_sec` while a browser is watching; keeps the last good state on errors."""
+    """Polls the probe every `interval_sec` while a browser is watching and wakes every waiting stream after each
+    attempt; keeps the last good state on errors."""
 
     def __init__(self, link: Runner, probe_source: str, interval_sec: float) -> None:
         self._link = link
@@ -118,6 +119,8 @@ class Sampler:
         self._state: dict | None = None
         self._error: str | None = None
         self._lock = threading.Lock()
+        self._changed = threading.Condition(self._lock)
+        self._version = 0             # bumped after every sample attempt, good or failed
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._last_viewer_at = time.monotonic()
@@ -131,15 +134,21 @@ class Sampler:
         self._wake.set()
         self._thread.join(timeout=PROBE_TIMEOUT_SEC + 1)
 
-    def latest(self) -> dict:
+    def wait_for_update(self, seen_version: int, timeout_sec: float) -> tuple[int, dict]:
+        """Blocks until a sample newer than `seen_version` lands or `timeout_sec` passes, then returns
+        (version, snapshot). Calling it keeps the sampler awake, so a stream must call it at least every IDLE_AFTER_SEC."""
         self._last_viewer_at = time.monotonic()
         self._wake.set()
-        with self._lock:
-            status = "error" if self._error else ("ok" if self._state else "connecting")
-            # Age is measured on this host's clock so the browser never compares two machines' clocks.
-            age_sec = round(time.time() - self._state["received_at"], 1) if self._state else None
-            return {"status": status, "error": self._error, "link": self._link.label,
-                    "interval_sec": self._interval_sec, "age_sec": age_sec, "state": self._state}
+        with self._changed:
+            self._changed.wait_for(lambda: self._version != seen_version, timeout=timeout_sec)
+            return self._version, self._snapshot()
+
+    def _snapshot(self) -> dict:
+        status = "error" if self._error else ("ok" if self._state else "connecting")
+        # Age is measured on this host's clock so the browser never compares two machines' clocks.
+        age_sec = round(time.time() - self._state["received_at"], 1) if self._state else None
+        return {"status": status, "error": self._error, "link": self._link.label,
+                "interval_sec": self._interval_sec, "age_sec": age_sec, "state": self._state}
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -160,8 +169,12 @@ class Sampler:
             state["received_at"] = time.time()
         except (RunnerError, CommandTimeout, json.JSONDecodeError, KeyError) as exc:
             LOG.warning("Sample failed: %s", exc)
-            with self._lock:
-                self._error = str(exc)
+            self._publish(self._state, str(exc))
             return
-        with self._lock:
-            self._state, self._error = state, None
+        self._publish(state, None)
+
+    def _publish(self, state: dict | None, error: str | None) -> None:
+        with self._changed:
+            self._state, self._error = state, error
+            self._version += 1
+            self._changed.notify_all()

@@ -53,21 +53,21 @@ function unreachableMessage() {
     : `Không gọi được ${apiHostLabel()}. Server, tunnel Cloudflare hoặc service oracle-panel đang tắt?`;
 }
 
-async function request(path, init, { timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
-  const signals = [AbortSignal.timeout(timeoutMs)];
-  if (signal) signals.push(signal);
-  let response;
+function toApiError(error, timeoutMs) {
+  if (error instanceof ApiError || error.name === 'AbortError') return error;
+  if (error.name === 'TimeoutError') return new ApiError(`Quá ${timeoutMs / 1000}s không phản hồi`, 0);
+  return new ApiError(unreachableMessage(), 0);
+}
+
+async function openResponse(path, init, signal, timeoutMs) {
   try {
-    response = await fetch(API_BASE + path, {
-      ...init,
-      headers: { ...authHeaders(), ...(init.headers || {}) },
-      signal: AbortSignal.any(signals),
-    });
+    return await fetch(API_BASE + path, { ...init, headers: { ...authHeaders(), ...(init.headers || {}) }, signal });
   } catch (error) {
-    if (error.name === 'TimeoutError') throw new ApiError(`Quá ${timeoutMs / 1000}s không phản hồi`, 0);
-    if (error.name === 'AbortError') throw error;
-    throw new ApiError(unreachableMessage(), 0);
+    throw toApiError(error, timeoutMs);
   }
+}
+
+async function readPayload(response, path) {
   const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
   if (response.status === HTTP_UNAUTHORIZED && !IS_DESKTOP && path !== '/api/login') {
     writeSession(null);
@@ -75,6 +75,64 @@ async function request(path, init, { timeoutMs = DEFAULT_TIMEOUT_MS, signal } = 
   }
   if (!response.ok) throw new ApiError(payload.error || `HTTP ${response.status}`, response.status);
   return payload;
+}
+
+async function request(path, init, { timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
+  const signals = [AbortSignal.timeout(timeoutMs)];
+  if (signal) signals.push(signal);
+  const response = await openResponse(path, init, AbortSignal.any(signals), timeoutMs);
+  return readPayload(response, path);
+}
+
+async function readEventFrames(body, onMessage, onActivity) {
+  const reader = body.pipeThrough(new TextDecoderStream()).getReader();
+  let pending = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    onActivity();
+    const frames = (pending + value).split('\n\n');
+    pending = frames.pop();
+    for (const frame of frames) {
+      const dataLines = frame.split('\n').filter((line) => line.startsWith('data:'));
+      if (dataLines.length) onMessage(parseFrame(dataLines.map((line) => line.slice(5)).join('\n')));
+    }
+  }
+}
+
+function parseFrame(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ApiError('Luồng số liệu trả về JSON hỏng', 0);
+  }
+}
+
+/**
+ * Reads a Server-Sent Events stream through fetch (EventSource cannot send the auth headers) and calls
+ * onMessage with every JSON `data:` frame. Resolves when the server ends the stream; rejects with ApiError
+ * when nothing arrives for idleTimeoutMs, which is how a silently dropped connection gets noticed.
+ */
+export async function apiStream(path, onMessage, { idleTimeoutMs, signal }) {
+  const streamController = new AbortController();
+  let idleTimer = 0;
+  const restartIdleTimer = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => streamController.abort(new DOMException('stream idle', 'TimeoutError')), idleTimeoutMs);
+  };
+  restartIdleTimer();
+  try {
+    const streamSignal = AbortSignal.any([streamController.signal, signal]);
+    const init = { method: 'GET', headers: { Accept: 'text/event-stream' } };
+    const response = await openResponse(path, init, streamSignal, idleTimeoutMs);
+    if (!response.ok) await readPayload(response, path);
+    await readEventFrames(response.body, onMessage, restartIdleTimer);
+  } catch (error) {
+    throw toApiError(error, idleTimeoutMs);
+  } finally {
+    clearTimeout(idleTimer);
+    streamController.abort(); // closes the connection when onMessage threw mid-stream
+  }
 }
 
 export function apiGet(path, params = {}, options = {}) {

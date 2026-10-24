@@ -1,4 +1,4 @@
-import { apiGet, apiHostLabel, hasSession, login, logout, needsLogin } from './api.js';
+import { apiHostLabel, apiStream, hasSession, login, logout, needsLogin } from './api.js';
 import { clockTime, duration } from './fmt.js';
 import { createJournal } from './journal.js';
 import { createOverview } from './overview.js';
@@ -8,9 +8,11 @@ import { createServices } from './services.js';
 import { createShell } from './shell.js';
 import { isDialogOpen } from './ui.js';
 
-const DEFAULT_POLL_MS = 2000;
+const LIVE_STREAM_PATH = '/api/live/stream';
+const RECONNECT_MS = 1000;
 const ERROR_RETRY_MS = 5000;
-const LIVE_TIMEOUT_MS = 15000;
+// The server sends a frame at least every 5s, so three missed frames means the connection is dead.
+const LIVE_IDLE_TIMEOUT_MS = 15000;
 const STALE_AFTER_SEC = 10;
 const VIEW_STORAGE_KEY = 'oracle-panel.view';
 const LIVE_VIEWS = new Set(['overview', 'processes']);
@@ -39,7 +41,7 @@ const views = {
 
 let activeView = 'overview';
 let lastLive = null;
-let pollTimer = 0;
+let liveController = null;
 let isRunning = false;
 
 function readStoredView() {
@@ -77,23 +79,51 @@ function renderLinkState(live) {
   if (error) bannerEl.textContent = `Lỗi lấy số liệu: ${error}\nPanel tự thử lại mỗi vài giây.`;
 }
 
-async function pollLive() {
-  if (!isRunning) return;
-  let nextDelayMs = DEFAULT_POLL_MS;
-  try {
-    lastLive = await apiGet('/api/live', {}, { timeoutMs: LIVE_TIMEOUT_MS });
-    nextDelayMs = (lastLive.interval_sec || DEFAULT_POLL_MS / 1000) * 1000;
-    renderLinkState(lastLive);
-    if (lastLive.state && LIVE_VIEWS.has(activeView)) views[activeView].render(lastLive.state);
-  } catch (error) {
-    if (!isRunning) return; // a 401 already switched to the login screen
-    nextDelayMs = ERROR_RETRY_MS;
-    linkStateEl.dataset.state = 'error';
-    linkTextEl.textContent = 'không gọi được API';
-    bannerEl.hidden = false;
-    bannerEl.textContent = error.message;
+function renderLive(live) {
+  lastLive = live;
+  renderLinkState(live);
+  if (live.state && LIVE_VIEWS.has(activeView)) views[activeView].render(live.state);
+}
+
+function renderLiveFailure(error) {
+  linkStateEl.dataset.state = 'error';
+  linkTextEl.textContent = 'không gọi được API';
+  bannerEl.hidden = false;
+  bannerEl.textContent = error.message;
+}
+
+function pause(ms, signal) {
+  return new Promise((resolve) => {
+    const onAbort = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function streamLive(signal) {
+  while (!signal.aborted) {
+    let retryMs = RECONNECT_MS;
+    try {
+      await apiStream(LIVE_STREAM_PATH, renderLive, { signal, idleTimeoutMs: LIVE_IDLE_TIMEOUT_MS });
+    } catch (error) {
+      if (signal.aborted) return; // logout, a 401 or a hidden tab stopped it on purpose
+      retryMs = ERROR_RETRY_MS;
+      renderLiveFailure(error);
+    }
+    await pause(retryMs, signal);
   }
-  pollTimer = setTimeout(pollLive, nextDelayMs);
+}
+
+function startLive() {
+  if (liveController) return;
+  liveController = new AbortController();
+  // Not awaited on purpose: the loop lives until stopLive() aborts it and never rejects.
+  streamLive(liveController.signal);
+}
+
+function stopLive() {
+  liveController?.abort();
+  liveController = null;
 }
 
 function startApp() {
@@ -102,12 +132,12 @@ function startApp() {
   isRunning = true;
   const hashView = location.hash.slice(1);
   showView(views[hashView] ? hashView : (readStoredView() || 'overview'));
-  pollLive();
+  if (!document.hidden) startLive();
 }
 
 function showLogin(message = '') {
   isRunning = false;
-  clearTimeout(pollTimer);
+  stopLive();
   document.getElementById('login-host').textContent = apiHostLabel();
   loginErrorEl.hidden = !message;
   loginErrorEl.textContent = message;
@@ -168,6 +198,12 @@ logoutButtonEl.addEventListener('click', async () => {
   } catch (error) {
     showLogin(`Đã xoá phiên trên máy này, nhưng server chưa xác nhận: ${error.message}`);
   }
+});
+// A stream is not throttled in background tabs the way a timer was, so close it and let the server sampler idle.
+document.addEventListener('visibilitychange', () => {
+  if (!isRunning) return;
+  if (document.hidden) stopLive();
+  else startLive();
 });
 window.addEventListener('panel:unauthorized', () => showLogin('Phiên đăng nhập đã hết hạn, đăng nhập lại.'));
 
