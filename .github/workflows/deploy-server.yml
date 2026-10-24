@@ -1,0 +1,33 @@
+name: Deploy backend to server
+
+on:
+  push:
+    branches: [main]
+    paths: ['*.py', 'deploy/**', '.github/workflows/deploy-server.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile check
+        run: python3 -m py_compile *.py
+
+      - name: Ship backend (deploy key is restricted to deploy/receive.sh on the server)
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_TARGET: ${{ secrets.DEPLOY_TARGET }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          tar -cz panel.py auth.py metrics.py remote_ops.py remote_probe.py runner.py setup_auth.py deploy \
+            | ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o BatchMode=yes "$DEPLOY_TARGET"

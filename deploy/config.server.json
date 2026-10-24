@@ -1,0 +1,11 @@
+{
+  "mode": "local",
+  "listen_port": 47620,
+  "sample_interval_sec": 2,
+  "log_path": "~/.local/state/oracle-panel/panel.log",
+  "public": {
+    "allowed_origins": ["https://wanfuc901.github.io"],
+    "allowed_hosts": ["panel-api.hoangphuc.store"],
+    "secrets_path": "~/.config/oracle-panel/secrets.json"
+  }
+}

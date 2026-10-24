@@ -1,0 +1,9 @@
+{
+  "mode": "ssh",
+  "host": "203.0.113.10",
+  "port": 22,
+  "user": "ubuntu",
+  "key_path": "C:\\Users\\you\\.ssh\\server_key",
+  "listen_port": 47620,
+  "sample_interval_sec": 2
+}

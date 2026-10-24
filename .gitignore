@@ -1,0 +1,6 @@
+# Machine-specific: contains the server IP (hidden behind the Cloudflare tunnel) and the local key path.
+config.json
+known_hosts
+*.log
+__pycache__/
+*.pyc

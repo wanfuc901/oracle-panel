@@ -1,0 +1,19 @@
+[Unit]
+Description=Oracle Panel (web task manager, API behind Cloudflare tunnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/oracle-panel/app
+ExecStart=/usr/bin/python3 /home/ubuntu/oracle-panel/app/panel.py --no-browser --config /home/ubuntu/oracle-panel/app/deploy/config.server.json
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+PrivateTmp=true
+# Commands started from the panel (incl. sudo apt) live in this cgroup, so leave headroom on the 1 GB VM.
+MemoryMax=300M
+# NoNewPrivileges is deliberately absent: the panel needs sudo for systemctl, kill and journalctl.
+
+[Install]
+WantedBy=multi-user.target

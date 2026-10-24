@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="panel-token" content="__PANEL_TOKEN__">
+  <title>Oracle Panel</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230e0f0c'/%3E%3Cpath d='M3 12h2V7H3zm4 0h2V4H7zm4 0h2V9h-2z' fill='%23f2a93b'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="panel.css">
+  <script type="module" src="js/main.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="host-id">
+      <span class="host-id__user" id="host-user">đang kết nối</span>
+      <span class="host-id__meta" id="host-meta"></span>
+    </div>
+    <div class="link-state" id="link-state" data-state="connecting">
+      <span class="link-state__dot"></span><span id="link-text">mở SSH…</span>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button type="button" data-view="overview" class="is-active"><kbd>1</kbd>Tổng quan</button>
+      <button type="button" data-view="processes"><kbd>2</kbd>Tiến trình</button>
+      <button type="button" data-view="services"><kbd>3</kbd>Dịch vụ</button>
+      <button type="button" data-view="ports"><kbd>4</kbd>Cổng</button>
+      <button type="button" data-view="journal"><kbd>5</kbd>Nhật ký</button>
+      <button type="button" data-view="shell"><kbd>6</kbd>Lệnh</button>
+    </nav>
+    <button type="button" class="btn" id="logout-button" hidden>Đăng xuất</button>
+  </header>
+
+  <div class="banner" id="link-banner" hidden></div>
+
+  <main>
+    <section class="view" data-view="overview" id="view-overview"></section>
+    <section class="view" data-view="processes" id="view-processes" hidden></section>
+    <section class="view" data-view="services" id="view-services" hidden></section>
+    <section class="view" data-view="ports" id="view-ports" hidden></section>
+    <section class="view" data-view="journal" id="view-journal" hidden></section>
+    <section class="view" data-view="shell" id="view-shell" hidden></section>
+  </main>
+
+  <output class="notice" id="notice" hidden></output>
+
+  <div class="login" id="login" hidden>
+    <form class="login__box" id="login-form" autocomplete="on">
+      <h1 class="login__title">Oracle Panel</h1>
+      <p class="muted">API: <span id="login-host"></span></p>
+      <label class="login__field"><span class="label">Mật khẩu</span>
+        <input class="field" type="password" name="password" autocomplete="current-password" required maxlength="256"></label>
+      <label class="login__field"><span class="label">Mã 2FA (Google Authenticator)</span>
+        <input class="field" name="otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required placeholder="6 số"></label>
+      <p class="login__error" id="login-error" hidden></p>
+      <button class="btn btn--primary" type="submit">Đăng nhập</button>
+      <p class="faint login__hint">Sai 5 lần thì IP bị khoá 15 phút. Mỗi mã 2FA chỉ dùng được một lần.</p>
+    </form>
+  </div>
+
+  <dialog class="confirm" id="confirm-dialog">
+    <form method="dialog">
+      <h2 class="confirm__title" id="confirm-title"></h2>
+      <p class="confirm__body" id="confirm-body"></p>
+      <div class="confirm__actions">
+        <button type="submit" value="cancel" class="btn">Huỷ <kbd>Esc</kbd></button>
+        <button type="submit" value="ok" class="btn btn--danger" id="confirm-ok"></button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
