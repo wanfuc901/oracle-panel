@@ -66,13 +66,14 @@ def disk_io_counters():
 
 
 def disk_usage():
-    seen_mounts = set()
+    # Keyed by device: systemd PrivateTmp bind-mounts the root fs again at /tmp and /var/tmp.
+    seen_devices = set()
     disks = []
     for line in read_text("/proc/mounts").splitlines():
         device, mount, fstype = line.split()[:3]
-        if fstype not in PHYSICAL_FS or mount in seen_mounts:
+        if fstype not in PHYSICAL_FS or device in seen_devices:
             continue
-        seen_mounts.add(mount)
+        seen_devices.add(device)
         try:
             stats = os.statvfs(mount)
         except OSError:
